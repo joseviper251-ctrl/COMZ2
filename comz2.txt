@@ -1,0 +1,118 @@
+-- Gun tweaks: fire delay + no recoil / screen shake (client-side).
+-- Requires a Rayfield-compatible executor environment.
+
+local RS = game:GetService("ReplicatedStorage")
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+local WFC = require(RS.Modules.WeaponFireControl)
+local Spring = require(RS.Modules.Utilities).Spring.spring
+
+local origWait = _G.__fastFireOrig or WFC.Wait
+_G.__fastFireOrig = origWait
+local origNew = Spring.new
+
+local state = {
+	fireDelayPercent = 0, -- 0 = no delay between shots (toggle on by default)
+	noRecoil = false,
+}
+
+local noop = function() end
+local springs = setmetatable({}, { __mode = "k" })
+local springOrig = setmetatable({}, { __mode = "k" })
+
+-- Recoil: swap each spring's Accelerate for a no-op, and restore the original on toggle off.
+local function setSpringRecoil(s, off)
+	if off then
+		if springOrig[s] == nil then
+			springOrig[s] = rawget(s, "Accelerate") or false
+		end
+		springs[s] = true
+		rawset(s, "Accelerate", noop)
+	else
+		local orig = springOrig[s]
+		if orig ~= nil then
+			rawset(s, "Accelerate", orig or nil)
+			springOrig[s] = nil
+		end
+		springs[s] = nil
+	end
+end
+
+local function applyRecoil(off)
+	state.noRecoil = off
+	for s in pairs(springs) do
+		setSpringRecoil(s, off)
+	end
+	if off then
+		for _, o in ipairs(getgc(true)) do
+			if type(o) == "table" and type(rawget(o, "GetPosVel")) == "function" and type(rawget(o, "Accelerate")) == "function" then
+				setSpringRecoil(o, true)
+			end
+		end
+	end
+end
+
+-- Fire delay: scale the wait the game passes to WeaponFireControl:Wait.
+WFC.Wait = function(self, delay, ...)
+	local d = tonumber(delay) or 0
+	return origWait(self, d * (state.fireDelayPercent / 100), ...)
+end
+
+-- Springs created after the toggle is on also get recoil removed.
+Spring.new = function(...)
+	local s = origNew(...)
+	if state.noRecoil then
+		setSpringRecoil(s, true)
+	end
+	return s
+end
+
+-- Refresh loop: catches recoil springs from guns that load after the toggle.
+if _G.__gunTweakConn then
+	_G.__gunTweakConn:Disconnect()
+end
+local lastRefresh = 0
+_G.__gunTweakConn = game:GetService("RunService").Heartbeat:Connect(function()
+	if not state.noRecoil or os.clock() - lastRefresh < 2 then return end
+	lastRefresh = os.clock()
+	applyRecoil(true)
+end)
+
+local Window = Rayfield:CreateWindow({
+	Name = "Call of Mini Zombies 2 - Gun Tweaks",
+	LoadingTitle = "Gun Tweaks",
+	LoadingSubtitle = "Client-side",
+	ConfigurationSaving = { Enabled = false },
+	KeySystem = false,
+})
+
+local Tab = Window:CreateTab("Weapon", 4483362458)
+
+Tab:CreateToggle({
+	Name = "Instant fire rate (zero delay)",
+	CurrentValue = true,
+	Flag = "InstantFire",
+	Callback = function(value)
+		state.fireDelayPercent = value and 0 or 100
+	end,
+})
+
+Tab:CreateToggle({
+	Name = "No recoil / screen shake",
+	CurrentValue = false,
+	Flag = "NoRecoil",
+	Callback = function(value)
+		applyRecoil(value)
+	end,
+})
+
+Tab:CreateButton({
+	Name = "Reset to normal",
+	Callback = function()
+		state.fireDelayPercent = 100
+		applyRecoil(false)
+		Rayfield:Notify({ Title = "Reset", Content = "Fire delay 100%, recoil restored.", Duration = 3 })
+	end,
+})
+
+Rayfield:LoadConfiguration()
